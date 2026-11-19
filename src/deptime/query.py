@@ -2651,30 +2651,53 @@ class DepTime:
         installed: str | None,
     ) -> list[Finding]:
         """A private attribute missing from a class no covered package has, found among the package's members that
-        aren't public API (DT-CORE-42): gplearn's `SymbolicRegressor.fit` calls `self._validate_data`, which
-        scikit-learn 1.7 removed from `BaseEstimator`. Only at a known installed release, when exactly one class of
-        the package had the name until before it and no class has it there; inferred, so at most medium."""
+        aren't public API (DT-CORE-42, DT-CORE-65): gplearn's `SymbolicRegressor.fit` calls `self._validate_data`,
+        which scikit-learn 1.7 removed from `BaseEstimator`. Only at a known installed release. Without library
+        frames, when exactly one class of the package had the name until before it and no class has it there; the
+        frames, when present, only narrow the candidates to classes defined in a module a frame ran in. Inferred,
+        so at most medium."""
         assert self.store is not None
         member, owner = signal.name or "", (signal.owner or "").rsplit(".", 1)[-1]
         if resolved is None or not _is_private(member):
             return []
         rows = self.store.internal_member_owners(spec.name, member)
         ordinal = resolved["ordinal"]
-        if not rows or any(r["first_ordinal"] <= ordinal <= r["last_ordinal"] for r in rows):
-            return []  # never a member, or some class still has it: the error has another cause
-        gone = {r["cls"]: r for r in rows if r["last_ordinal"] < ordinal}
-        if len(gone) != 1:
+        if not rows:
             return []
-        (row,) = gone.values()
+        frame_modules = set(signal.library_modules)
+        if frame_modules:
+            # DT-CORE-65: a private member can remain on another class of the package, so a bare "some class
+            # still has it" abstains even though the traceback says which one was called. transformers removed
+            # GenerationMixin's method while TFGenerationMixin kept it; a frame in generation.utils picks the
+            # former. A class's canonical path starts with the module that defines it, so match on that prefix.
+            narrowed = [r for r in rows if r["cls"].rpartition(".")[0] in frame_modules]
+            if len(narrowed) != 1 or narrowed[0]["last_ordinal"] >= ordinal:
+                return []
+            row = narrowed[0]
+        else:
+            if any(r["first_ordinal"] <= ordinal <= r["last_ordinal"] for r in rows):
+                return []  # some class still has it: the error has another cause
+            gone = {r["cls"]: r for r in rows if r["last_ordinal"] < ordinal}
+            if len(gone) != 1:
+                return []
+            (row,) = gone.values()
         f = self._symbol_finding(
             spec, f"{row['label']}.{member}", resolved, exact, installed, message=signal.message
         )
         if f.issue != "symbol_removed":
             return []
-        why = (
-            f"`{owner}` isn't a class of a package DepTime covers; of {spec.name}'s classes, only "
-            f"`{row['label']}` had `{member}`, which subclasses inherit."
-        )
+        if frame_modules:
+            why = (
+                f"`{owner}` isn't a class of a package DepTime covers; the traceback ran through "
+                f"`{row['cls'].rpartition('.')[0]}`, which defines `{row['label']}`, and no other class of "
+                f"{spec.name} that had `{member}` is defined in a module the traceback ran through. "
+                f"`{row['label']}` no longer has `{member}`, which subclasses inherit."
+            )
+        else:
+            why = (
+                f"`{owner}` isn't a class of a package DepTime covers; of {spec.name}'s classes, only "
+                f"`{row['label']}` had `{member}`, which subclasses inherit."
+            )
         return [self._inferred(f, why)]
 
     def _raising_stub_findings(
