@@ -104,3 +104,37 @@ def test_no_frames_keeps_todays_answer(tmp_path):
         ).findings
         == []
     )
+
+
+def _index_single_gone(tmp_path: Path) -> DepTime:
+    """Only GenerationMixin ever had the member; no class has it at 4.52.4 (the DT-CORE-42 shape)."""
+    releases = {
+        "4.48.3": {
+            "gen/__init__.py": "from gen.generation.utils import GenerationMixin\n",
+            "gen/generation/__init__.py": "",
+            "gen/generation/utils.py": f"class GenerationMixin:\n    def {MEMBER}(self):\n        pass\n",
+        },
+        "4.52.4": {
+            "gen/__init__.py": "from gen.generation.utils import GenerationMixin\n",
+            "gen/generation/__init__.py": "",
+            "gen/generation/utils.py": "class GenerationMixin:\n    pass\n",
+        },
+    }
+    spec = PackageSpec(name="gen", import_names=("gen",), tier="B")
+    store = IndexStore.memory()
+    store.rebuild_package(spec, _snapshots(tmp_path, releases))
+    return DepTime(store, Coverage(POLICY, (spec,)))
+
+
+def test_unmatched_frame_does_not_override_the_single_gone_class(tmp_path):
+    """DT-CORE-42: an unrelated library frame must not erase the one-class answer (the gplearn case)."""
+    dt = _index_single_gone(tmp_path)
+    (f,) = dt.explain_error(_tb("gplearn.genetic"), {"gen": "4.52.4"}).findings
+    assert (f.package, f.symbol, f.issue, f.last_version_with, f.confidence) == (
+        "gen",
+        f"gen.GenerationMixin.{MEMBER}",
+        "symbol_removed",
+        "4.48.3",
+        "medium",
+    )
+    assert "only " in f.explanation
